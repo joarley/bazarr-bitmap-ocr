@@ -1,0 +1,75 @@
+services:
+
+  # ── OCR service ────────────────────────────────────────────────────────────
+  # Handles PGS/VobSub extraction, Tesseract OCR, and optional LLM translation.
+  # Built from the Dockerfile in this repository.
+  ocr-service:
+    build: .
+    container_name: ocr-service
+    restart: unless-stopped
+    networks:
+      - bazarr-net
+    volumes:
+      # ⚠ Must match the media path used in the bazarr service below
+      - /path/to/your/media:/mnt/media:ro
+    environment:
+      # Run as the same user that owns your media files
+      - PUID=1000
+      - PGID=1000
+
+      # --- ffmpeg ---
+      - FFMPEG_PATH=ffmpeg
+      - FFMPEG_TIMEOUT=120
+
+      # --- Tesseract OCR ---
+      # Upscale factor applied to subtitle images before OCR (higher = slower but more accurate)
+      - OCR_UPSCALE=2
+
+      # --- LLM translation (optional) ---
+      # Remove or leave LLM_API_KEY empty to disable translation entirely.
+      #
+      # Default: Google Gemini via its built-in OpenAI-compatible endpoint.
+      # Get a free key at https://aistudio.google.com
+      - LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+      - LLM_API_KEY=your-google-ai-studio-key-here
+      - LLM_MODEL=gemini-2.0-flash
+      #
+      # --- Alternative: any OpenAI-compatible endpoint ---
+      # OpenAI:        LLM_BASE_URL=https://api.openai.com/v1  +  LLM_MODEL=gpt-4o-mini
+      # Ollama (local): LLM_BASE_URL=http://ollama:11434/v1    +  LLM_API_KEY=  (leave empty)
+      
+      # Comma-separated ISO 639-2 codes of streams eligible as translation source
+      - TRANSLATION_SOURCE_LANGS=eng
+      # Number of subtitle lines sent per LLM request
+      - TRANSLATION_BATCH_SIZE=50
+
+  # ── Bazarr ─────────────────────────────────────────────────────────────────
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    restart: unless-stopped
+    networks:
+      - bazarr-net
+    ports:
+      - "6767:6767"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Sao_Paulo
+
+      # OCR sidecar connection
+      - OCR_SERVICE_URL=http://ocr-service:8000
+      # Increase if processing long movies with translation (OCR alone ~1 min/ep)
+      - OCR_REQUEST_TIMEOUT=600
+      - OCR_CAPABILITIES_TIMEOUT=10
+    volumes:
+      - ./bazarr-config:/config
+      # Provider modules — mounted directly into subliminal_patch so Bazarr loads them automatically
+      - ./provider/bitmap_embedded_subtitles.py:/app/bazarr/bin/custom_libs/subliminal_patch/providers/bitmap_embedded_subtitles.py:ro
+      - ./provider/subtitle_translator.py:/app/bazarr/bin/custom_libs/subliminal_patch/providers/subtitle_translator.py:ro
+      # ⚠ Must match the media path used in the ocr-service above (same host path, same container path)
+      - /path/to/your/media:/mnt/media
+
+networks:
+  bazarr-net:
+    driver: bridge

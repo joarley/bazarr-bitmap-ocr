@@ -1,0 +1,30 @@
+[package]
+name = "ocr-service"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ocr-service"
+path = "src/main.rs"
+
+[dependencies]
+axum           = "0.7"
+tokio          = { version = "1", features = ["full"] }
+serde          = { version = "1", features = ["derive"] }
+serde_json     = "1"
+anyhow         = "1"
+tracing        = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# PGS parsing + OCR
+pgs-rs  = "0.1"
+leptess = "0.14"
+image   = { version = "0.25", default-features = false, features = ["png", "pnm"] }
+rayon   = "1"
+
+# LLM translation via OpenAI-compatible API (e.g. LiteLLM proxy)
+async-openai = "0.28"
+
+# Misc
+tempfile = "3"
+regex    = "1"
