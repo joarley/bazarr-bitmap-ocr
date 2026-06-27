@@ -112,19 +112,13 @@ async fn translate_batched(
 ) -> anyhow::Result<Vec<String>> {
     let mut results = Vec::with_capacity(texts.len());
 
+    let total_batches = texts.chunks(batch_size).count();
     for (batch_idx, chunk) in texts.chunks(batch_size).enumerate() {
         let translated = call_llm(base_url, api_key, model, chunk, source_name, target_name)
             .await
-            .unwrap_or_else(|e| {
-                warn!(
-                    "LLM batch {} failed ({} entries kept as-is): {e}",
-                    batch_idx + 1,
-                    chunk.len()
-                );
-                chunk.iter().map(|s| s.to_string()).collect()
-            });
+            .with_context(|| format!("LLM batch {}/{} failed", batch_idx + 1, total_batches))?;
         results.extend(translated);
-        info!("Translated batch {}", batch_idx + 1);
+        info!("Translated batch {}/{}", batch_idx + 1, total_batches);
     }
 
     Ok(results)

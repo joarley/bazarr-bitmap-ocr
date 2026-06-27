@@ -34,9 +34,6 @@ class EmbeddedBitmapSubtitle(Subtitle):
     provider_name = "bitmap_embedded_subtitles"
     hash_verifiable = False
     hearing_impaired_verifiable = True
-    # OCR (and translation) are machine-generated — Bazarr applies a score
-    # penalty so any human-sourced subtitle from another provider wins.
-    machine_translated = True
 
     def __init__(
         self,
@@ -58,6 +55,10 @@ class EmbeddedBitmapSubtitle(Subtitle):
         self.translate_to = translate_to  # alpha3 target, None = no translation
         self.forced = forced
         self.media_type = media_type
+        # Mark as machine-translated only when an actual language translation happened.
+        # Direct OCR (same language) is not "translated" — keeps a higher score so
+        # Bazarr won't loop trying to upgrade it via the "Upgrade Translated" setting.
+        self.machine_translated = translate_to is not None
 
     @property
     def id(self):

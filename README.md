@@ -113,6 +113,16 @@ docker compose restart bazarr
 
 > The provider does not appear in the Bazarr Settings UI (the provider list there is hardcoded in the frontend), but it works fully in the background. Check the Bazarr logs to confirm it loads: you should see `[bitmap_embedded] Provider initialized`.
 
+### 7. Disable subtitle upgrade for translated subtitles
+
+OCR and translation are expensive operations — OCR can take several minutes per episode and translation has a per-request LLM cost. Bazarr's **Upgrade** feature periodically re-runs all providers looking for better subtitles, which would trigger a full re-extraction and re-translation every time.
+
+Go to **Settings → Subtitles** and disable:
+
+- **Upgrade Manually Downloaded or Translated Subtitles**
+
+This prevents Bazarr from re-running OCR and translation on subtitles it has already generated. Subtitles from external providers (OpenSubtitles, Subscene, etc.) are not affected — they will still be upgraded normally.
+
 ---
 
 ## Configuration reference
