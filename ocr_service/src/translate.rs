@@ -2,10 +2,33 @@ use anyhow::Context;
 use async_openai::{
     Client,
     config::OpenAIConfig,
-    types::{ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs},
+    types::{
+        ChatCompletionRequestSystemMessageArgs,
+        ChatCompletionRequestUserMessageArgs,
+        CreateChatCompletionRequestArgs,
+    },
 };
-use regex::Regex;
+use std::collections::BTreeMap;
 use tracing::{info, warn};
+
+const SYSTEM_PROMPT: &str = "\
+You are a professional subtitle translator.
+
+Translate only the subtitle text.
+
+Rules that must always be followed:
+
+- Keep every subtitle identifier exactly as received (e.g. [1], [2], [3]).
+- Never remove, reorder, or renumber identifiers.
+- Translate only the text that follows each identifier.
+- Preserve the exact number of text lines for every subtitle.
+- Each input text line must produce exactly one translated text line.
+- Never merge two lines.
+- Never split one line into multiple lines.
+- Preserve empty lines between subtitle entries.
+- Preserve placeholders, variables, HTML tags, formatting tags, and special tokens exactly as they appear.
+- Return only the translated subtitles.
+- Do not add explanations or markdown.";
 
 /// Translate an SRT string via an OpenAI-compatible LLM endpoint (e.g. LiteLLM).
 /// Timestamps and indices are preserved; only the text lines are translated.
@@ -46,7 +69,9 @@ fn parse_srt(srt: &str) -> Vec<SrtBlock> {
         .split("\n\n")
         .filter_map(|block| {
             let block = block.trim();
-            if block.is_empty() { return None; }
+            if block.is_empty() {
+                return None;
+            }
             let mut lines = block.splitn(3, '\n');
             let idx  = lines.next()?.trim().to_string();
             let ts   = lines.next()?.trim().to_string();
@@ -92,7 +117,7 @@ async fn translate_batched(
             .await
             .unwrap_or_else(|e| {
                 warn!(
-                    "LLM batch {} failed ({} lines kept as-is): {e}",
+                    "LLM batch {} failed ({} entries kept as-is): {e}",
                     batch_idx + 1,
                     chunk.len()
                 );
@@ -109,11 +134,11 @@ async fn call_llm(
     base_url: &str,
     api_key: Option<&str>,
     model: &str,
-    lines: &[&str],
+    entries: &[&str],
     source_name: &str,
     target_name: &str,
 ) -> anyhow::Result<Vec<String>> {
-    let prompt = build_prompt(lines, source_name, target_name);
+    let user_msg = build_user_message(entries, source_name, target_name);
 
     let mut cfg = OpenAIConfig::new().with_api_base(base_url);
     if let Some(key) = api_key {
@@ -123,10 +148,17 @@ async fn call_llm(
 
     let request = CreateChatCompletionRequestArgs::default()
         .model(model)
-        .messages([ChatCompletionRequestUserMessageArgs::default()
-            .content(prompt.as_str())
-            .build()?
-            .into()])
+        .temperature(0.0f32)
+        .messages([
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(SYSTEM_PROMPT)
+                .build()?
+                .into(),
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(user_msg.as_str())
+                .build()?
+                .into(),
+        ])
         .build()?;
 
     let response = client
@@ -142,59 +174,93 @@ async fn call_llm(
         .and_then(|c| c.message.content)
         .unwrap_or_default();
 
-    Ok(parse_bracketed_response(&raw_text, lines.len(), lines))
+    Ok(parse_block_response(&raw_text, entries.len(), entries))
 }
 
-fn build_prompt(lines: &[&str], source_name: &str, target_name: &str) -> String {
-    // Replace real newlines with literal \n so multi-line subtitles stay on one prompt line.
-    let numbered: Vec<String> = lines
+/// Build the user message in block format:
+///
+/// ```text
+/// Translate from English to Portuguese (Brazil).
+///
+/// [1]
+/// Hello!
+///
+/// [2]
+/// How are you?
+/// I'm doing great.
+/// ```
+///
+/// Multi-line subtitles (text containing '\n') appear as natural multiple lines — no escaping.
+fn build_user_message(entries: &[&str], source_name: &str, target_name: &str) -> String {
+    let blocks: Vec<String> = entries
         .iter()
         .enumerate()
-        .map(|(i, l)| format!("[{}] {}", i + 1, l.replace('\n', "\\n")))
+        .map(|(i, text)| format!("[{}]\n{}", i + 1, text))
         .collect();
 
     format!(
-        "Translate the following subtitle lines from {source_name} to {target_name}.\n\
-         Rules:\n\
-         - Preserve tone, register, and informal/colloquial speech\n\
-         - Keep internal line breaks (\\n) unchanged\n\
-         - Do NOT translate proper nouns or brand names\n\
-         - Reply with ONLY the translated lines using the exact same [N] prefix format\n\
-         - One [N] entry per line — no blank lines, no commentary, no explanations\n\n\
-         {}",
-        numbered.join("\n")
+        "Translate from {source_name} to {target_name}.\n\n{}",
+        blocks.join("\n\n")
     )
 }
 
-/// Parse `[N] translation` lines; tolerant of extra blank lines or commentary.
-fn parse_bracketed_response(raw: &str, expected: usize, fallback: &[&str]) -> Vec<String> {
-    let re = Regex::new(r"(?m)^\[(\d+)\]\s*(.+)").unwrap();
+/// Parse the LLM response in block format back into one translated string per input entry.
+///
+/// Expected response shape:
+/// ```text
+/// [1]
+/// Olá!
+///
+/// [2]
+/// Como vai você?
+/// Estou muito bem.
+/// ```
+///
+/// Each `[N]` marker must appear on its own line. Text lines following it (until the next
+/// marker or end of input) are the translation for that entry.
+fn parse_block_response(raw: &str, expected: usize, fallback: &[&str]) -> Vec<String> {
+    // Matches a line that is *only* a bracketed number, e.g. "[1]" or "[42]".
+    let is_marker = |line: &str| -> Option<usize> {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            t[1..t.len() - 1].parse::<usize>().ok()
+        } else {
+            None
+        }
+    };
 
-    let mut map: std::collections::BTreeMap<usize, String> = std::collections::BTreeMap::new();
-    for cap in re.captures_iter(raw) {
-        if let Ok(n) = cap[1].parse::<usize>() {
-            map.entry(n).or_insert_with(|| cap[2].trim().replace("\\n", "\n").to_string());
+    let mut map: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    let mut current: Option<usize> = None;
+
+    for line in raw.lines() {
+        if let Some(n) = is_marker(line) {
+            current = Some(n);
+            map.entry(n).or_default();
+        } else if let Some(idx) = current {
+            map.entry(idx).or_default().push(line.to_string());
         }
     }
 
-    if map.len() == expected {
-        return map.into_values().collect();
-    }
-
-    // Fallback: if Gemini dropped the [N] prefix but returned the right count, use plain lines.
-    let plain: Vec<String> = raw
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
+    // Trim trailing blank lines from each entry and join with '\n'.
+    let result: BTreeMap<usize, String> = map
+        .into_iter()
+        .map(|(k, lines)| {
+            let end = lines
+                .iter()
+                .rposition(|l| !l.trim().is_empty())
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            (k, lines[..end].join("\n"))
+        })
         .collect();
-    if plain.len() == expected {
-        return plain;
+
+    if result.len() == expected {
+        return result.into_values().collect();
     }
 
     warn!(
-        "LLM returned {} bracketed + {} plain lines, expected {expected} — keeping originals",
-        map.len(),
-        plain.len()
+        "LLM returned {} blocks, expected {expected} — keeping originals",
+        result.len()
     );
     fallback.iter().map(|s| s.to_string()).collect()
 }
