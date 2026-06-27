@@ -206,7 +206,6 @@ bazarr-bitmap-ocr/
 ├── Dockerfile                         # OCR service image (Rust + Tesseract)
 ├── entrypoint.sh                      # Drops privileges to PUID/PGID at startup
 ├── docker-compose.example.yml         # Reference compose file
-├── litellm-config.yaml                # Example LiteLLM proxy config
 ├── ocr_service/
 │   ├── Cargo.toml
 │   └── src/
